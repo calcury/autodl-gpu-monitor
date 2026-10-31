@@ -33,7 +33,7 @@ inline const std::string WEBUI_HTML = R"rawhtml(
       flex-direction: column;
     }
     header {
-      background: rgba(30, 41, 59, 0.8);
+      background: rgba(30, 41, 59, 0.85);
       backdrop-filter: blur(12px);
       border-bottom: 1px solid var(--border);
       padding: 16px 32px;
@@ -44,11 +44,7 @@ inline const std::string WEBUI_HTML = R"rawhtml(
       top: 0;
       z-index: 50;
     }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
+    .brand { display: flex; align-items: center; gap: 12px; }
     .brand-icon {
       width: 32px;
       height: 32px;
@@ -121,7 +117,6 @@ inline const std::string WEBUI_HTML = R"rawhtml(
       flex-direction: column;
       gap: 16px;
       transition: all 0.2s ease;
-      position: relative;
     }
     .card:hover { border-color: rgba(56, 189, 248, 0.4); box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3); }
     .card-header {
@@ -273,7 +268,7 @@ inline const std::string WEBUI_HTML = R"rawhtml(
       <div class="brand-icon">G</div>
       <div>
         <h1>AutoDL 实例 GPU 监控面板</h1>
-        <p>开机抢卡守护器 (端口 5178)</p>
+        <p>开机抢卡守护器 (0.0.0.0:5178)</p>
       </div>
     </div>
     <div class="top-actions">
@@ -306,12 +301,12 @@ inline const std::string WEBUI_HTML = R"rawhtml(
     <div class="modal">
       <h2>添加监控实例</h2>
       <div class="form-group">
-        <label>实例 UUID (在 AutoDL 控制台复制)</label>
-        <input type="text" id="input-uuid" placeholder="例如: 3b14a2f8-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+        <label>实例 UUID (在 AutoDL 控制台复制，如: 5c854faafe-1d537d76)</label>
+        <input type="text" id="input-uuid" placeholder="例如: 5c854faafe-1d537d76" />
       </div>
       <div class="form-group">
         <label>备注名称</label>
-        <input type="text" id="input-alias" placeholder="例如: 毕业论文-RTX4090训练机" />
+        <input type="text" id="input-alias" placeholder="例如: 摩尔线程测试机" />
       </div>
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick="closeModal()">取消</button>
@@ -356,9 +351,9 @@ inline const std::string WEBUI_HTML = R"rawhtml(
         if (!item.enabled) {
           statusBadge = '<span class="status-badge disabled"><span class="pulse-dot"></span>监控已停用</span>';
         } else if (item.current_idle_num > 0) {
-          statusBadge = `<span class="status-badge available"><span class="pulse-dot"></span>🎉 有空闲卡: ${item.current_idle_num} 台</span>`;
+          statusBadge = `<span class="status-badge available"><span class="pulse-dot"></span>🎉 有空闲卡: ${item.current_idle_num} / ${item.gpu_all_num || '?'} 台</span>`;
         } else {
-          statusBadge = '<span class="status-badge empty"><span class="pulse-dot"></span>无空闲卡 (等待释放)</span>';
+          statusBadge = `<span class="status-badge empty"><span class="pulse-dot"></span>无空闲卡 (0 / ${item.gpu_all_num || '8'} 台)</span>`;
         }
 
         return `
@@ -380,7 +375,9 @@ inline const std::string WEBUI_HTML = R"rawhtml(
 
             <div class="meta-list">
               <div class="meta-item"><span>GPU 型号</span><span>${item.gpu_name || '检测中...'}</span></div>
-              <div class="meta-item"><span>物理机ID</span><span>${item.machine_id || '检测中...'}</span></div>
+              <div class="meta-item"><span>所属区域</span><span>${item.region_name || '检测中...'}</span></div>
+              <div class="meta-item"><span>物理宿主机</span><span>${item.machine_alias || ''} (${item.machine_id || '检测中...'})</span></div>
+              <div class="meta-item"><span>实例状态</span><span>${item.status_str || '关机中'}</span></div>
               <div class="meta-item"><span>最后检测</span><span>${item.last_check_time || '-'}</span></div>
             </div>
 
@@ -443,7 +440,7 @@ inline const std::string WEBUI_HTML = R"rawhtml(
       return div.innerHTML;
     }
 
-    // 初始化并每 3 秒自动拉取最新状态
+    // 初始化并每 3 秒自动刷新
     loadInstances();
     setInterval(loadInstances, 3000);
   </script>
