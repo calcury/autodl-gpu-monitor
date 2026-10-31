@@ -281,7 +281,7 @@ void check_instances_task() {
     auto resp = HttpClient::post_json("https://www.autodl.com/api/v1/sub_user/instance",
                                       req_body.dump(), headers);
 
-    if (!resp.success) {
+    if (!resp.success || resp.body.empty()) {
         std::cerr << "[API] 获取用户实例列表失败: " << resp.error_message << std::endl;
         return;
     }
@@ -384,7 +384,7 @@ void check_instances_task() {
         }
 
     } catch (const std::exception& e) {
-        std::cerr << "[错误] 解析实例列表响应异常: " << e.what() << std::endl;
+        std::cerr << "[错误] 解析实例列表响应异常: " << e.what() << "\n原始内容: " << resp.body.substr(0, 500) << std::endl;
     }
 }
 
