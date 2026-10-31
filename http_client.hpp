@@ -47,7 +47,7 @@ public:
 #ifdef _WIN32
     // ==========================================
     // Windows 实现 (基于 Windows 系统内置 WinHTTP，免装任何三方库)
-    // 编译命令: g++ -std=c++17 -O2 main.cpp -o autodl_monitor.exe -lwinhttp
+    // 编译命令: g++ -std=c++17 -O2 main.cpp -o autodl_monitor.exe -lws2_32 -lwinhttp
     // ==========================================
 private:
     static std::wstring to_wide(const std::string& str) {
@@ -167,9 +167,19 @@ public:
 
 #else
     // ==========================================
-    // Linux / POSIX 实现 (零外部库依赖，无需安装 libcurl 开发包，无需 <curl/curl.h>)
-    // 编译命令仅需: g++ -std=c++17 -O2 main.cpp -o autodl_monitor
+    // Linux / POSIX 实现 (健壮型执行器，带错误诊断与防干扰)
     // ==========================================
+private:
+    static std::string escape_shell_arg(const std::string& arg) {
+        std::string res = "'";
+        for (char c : arg) {
+            if (c == '\'') res += "'\\''";
+            else res += c;
+        }
+        res += "'";
+        return res;
+    }
+
 public:
     static HttpResponse request(const std::string& full_url,
                                 const std::string& method = "GET",
@@ -177,7 +187,7 @@ public:
                                 const std::map<std::string, std::string>& headers = {}) {
         HttpResponse response;
 
-        // 构造临时文件用于安全传输 body (规避命令行特殊字符转义问题)
+        // 构造临时请求文件，彻底避免命令行 JSON 字符转义问题
         std::string tmp_file = "/tmp/autodl_req_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".json";
         bool has_body = !body.empty() && (method == "POST" || method == "PUT");
         if (has_body) {
@@ -188,15 +198,23 @@ public:
             }
         }
 
+        // 1. 构建 curl 命令
+        // 参数说明:
+        // -s: 静音进度条
+        // -S: 出错时打印具体错误到 stderr
+        // -k: 允许非受信任证书（防止微型系统缺少 ca-certificates）
+        // --noproxy "*": 避免被本地残留的失效代理环境变量劫持
+        // --connect-timeout 10: 10秒连接超时
+        // -m 30: 30秒整体超时
         std::ostringstream cmd;
-        cmd << "curl -s -S -w \"\\n%{http_code}\" --connect-timeout 10 -m 30 -X " << method;
+        cmd << "curl -s -S -k --noproxy '*' -w \"\\n%{http_code}\" --connect-timeout 10 -m 30 -X " << method;
         for (const auto& [k, v] : headers) {
-            cmd << " -H " << std::quoted(k + ": " + v);
+            cmd << " -H " << escape_shell_arg(k + ": " + v);
         }
         if (has_body) {
             cmd << " --data-binary @" << tmp_file;
         }
-        cmd << " " << std::quoted(full_url) << " 2>/dev/null";
+        cmd << " " << escape_shell_arg(full_url) << " 2>&1"; // 合并输出方便定位真实原因
 
         FILE* pipe = popen(cmd.str().c_str(), "r");
         if (has_body) {
@@ -214,6 +232,13 @@ public:
             raw_output += buffer;
         }
         int exit_code = pclose(pipe);
+
+        // 如果命令未找到 (例如系统没有 curl)
+        if (raw_output.find("not found") != std::string::npos || raw_output.find("command not found") != std::string::npos) {
+            response.error_message = "系统未安装 curl 命令行，请执行 sudo apt-get install -y curl";
+            response.status_code = 0;
+            return response;
+        }
 
         // 解析输出结果：最后一行是 HTTP 状态码
         size_t last_newline = raw_output.find_last_of("\r\n");
@@ -236,11 +261,14 @@ public:
             response.status_code = std::stoi(status_str);
         } catch (...) {
             response.status_code = (exit_code == 0) ? 200 : 0;
+            if (response.status_code == 0) {
+                response.error_message = "连接异常: " + raw_output;
+            }
         }
 
         response.success = (response.status_code >= 200 && response.status_code < 400);
         if (!response.success && response.error_message.empty()) {
-            response.error_message = "HTTP 请求失败 (状态码: " + std::to_string(response.status_code) + ")";
+            response.error_message = "HTTP 请求失败 (状态码: " + std::to_string(response.status_code) + ", 详情: " + raw_output + ")";
         }
 
         return response;
