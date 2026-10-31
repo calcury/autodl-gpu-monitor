@@ -1,31 +1,36 @@
-# AutoDL GPU 自动监控工具 (C++ 零依赖原生跨平台版)
+# AutoDL 实例 GPU 监控系统 (WebUI + C++ 原生跨平台版)
 
-> 🚀 完全使用 C++ 重构的原生 GPU 资源监控与推送工具（**支持 Windows & Linux，零环境依赖，无需 CMake**，无需 Python 环境，使用 `g++` 直接一键编译）
+> 🚀 专为 AutoDL 关机实例“开机抢卡”打造的原生守护工具（**支持 WebUI 界面、多实例独立监控、跳变提醒、Windows & Linux 零依赖编译**）
 
-本项目专为 AutoDL 平台打造，纯 C++ 编写。专注于**监控目标 GPU 空闲资源**，并在检测到有可用算力时，自动通过**息知 (xizhi)** 渠道推送到微信。
+当你按量计费的 AutoDL 实例关机后，显卡会被释放。当你想重新开机时，若宿主机上的 GPU 被占满，往往提示“宿主机 GPU 资源不足，无法开机”。本项目专为解决该痛点而设计，全天候守护你的指定实例，并在**宿主机有空闲卡释放的瞬间**立即通过**息知**微信公众号推送开机通知！
 
 ---
 
 ## ✨ 核心特性
 
-- ⚡ **纯 C++ 零环境依赖构建**：
-  - **Linux**：**彻底移除 `<curl/curl.h>` 和 `-lcurl` 依赖**，不需要任何 `sudo apt install libcurl4-openssl-dev` 或开发库，所有代码保存在目录中，只需一个裸 `g++` 即可直接编译出独立可执行文件！
-  - **Windows**：基于系统内置 `WinHTTP`，零外部依赖，一行命令或双击批处理即可生成 `.exe`。
-- 📦 **不需要 CMake**：单行 `g++` 命令直接编译完成。
-- 🛡️ **安全纯净**：已彻底剔除下单抢购与自动扣费代码，仅保留 **检测 + 推送**，无误扣款风险。
-- 📱 **即时推送**：集成**息知**微信公众号推送，第一时间获取有卡通知。
-- 💾 **自动持久化**：首次启动交互式引导输入 Token 或登录，自动保存到 `config.json`。
+1. 🖥️ **内置轻量 WebUI 控制台 (开放在 5178 端口)**：
+   - 浏览器直接访问 `http://localhost:5178`。
+   - 界面可视化添加/删除监控实例（输入 UUID 和备注名称）。
+   - 每一台实例均提供**独立的开启/关闭监控开关**，关闭后立即停止检测。
+   - **严格隐私安全**：WebUI 界面与 API **绝不泄露与返回 Authorization Token**，对前端彻底保密。
+2. 🎯 **多实例独立监控与详细备注**：
+   - 支持同时监控任意多台不同的实例，各自具有独立备注（例如 `4090论文训练机`、`A100测试机`）。
+   - 微信推送消息中明确指出**具体是哪一台机器释放了显卡**（附带自定义备注、UUID、GPU 型号、空闲卡数及物理机 ID）。
+3. 🔔 **智能状态跳变提醒 (杜绝频繁骚扰)**：
+   - **核心判定机制**：仅在实例 GPU 从“无空闲（0台）”跃迁为“有空闲（>=1台）”的跳变瞬间触发微信提醒！
+   - **示例**：空闲数在 `0 -> 1 -> 0 -> 2 -> 4 -> 2 -> 0` 变化时，**仅在 `0 -> 1` 和 `0 -> 2` 触发两次提醒**！在有卡期间（1, 2, 4 等）绝不会每隔 30 秒重复轰炸。
+4. ⚡ **纯 C++ 零环境依赖构建 (无需 CMake)**：
+   - **Linux**：无需安装 `libcurl4-openssl-dev` 或任何外部开发库，单行裸 `g++` 即可直接编译出原生 ELF 单文件！
+   - **Windows**：基于系统内置 `WinHTTP` 与 `Winsock`，单行命令生成单一 `.exe`。
 
 ---
 
-## 🛠️ 编译说明（零环境依赖，无需 CMake）
+## 🛠️ 编译说明（无需 CMake，零外部依赖）
 
 ### 🐧 Linux 环境
-
-**无需安装任何额外开发库**，直接在项目目录执行：
-
+无需安装任何额外包，直接在项目目录执行：
 ```bash
-g++ -std=c++17 -O2 main.cpp -o autodl_monitor
+g++ -std=c++17 -O2 main.cpp -o autodl_monitor -lpthread
 ```
 或者运行脚本：
 ```bash
@@ -33,57 +38,67 @@ chmod +x build.sh
 ./build.sh
 ```
 
-> 💡 彻底消除了 `curl/curl.h: No such file or directory` 问题，项目内所有依赖（JSON 处理、SHA-1 计算、HTTP 客户端）全部自包含在工程目录下。
+### 🪟 Windows 环境
+- **命令行**：
+  ```cmd
+  g++ -std=c++17 -O2 main.cpp -o autodl_monitor.exe -lws2_32 -lwinhttp
+  ```
+- **双击脚本**：直接双击运行 [`build.bat`](file:///e:/github/collaborate/autodl-gpu-monitor/build.bat)。
 
 ---
 
-### 🪟 Windows 环境
+## 🌐 WebUI 界面使用 (端口 5178)
 
-- **命令行编译**：
-  ```cmd
-  g++ -std=c++17 -O2 main.cpp -o autodl_monitor.exe -lwinhttp
-  ```
-- **双击脚本**：直接运行根目录下的 [`build.bat`](file:///e:/github/collaborate/autodl-gpu-monitor/build.bat)。
+启动程序后，用浏览器访问：
+👉 **`http://localhost:5178`**
+
+- **查看状态**：实时查看每台实例的空闲 GPU 卡数、物理宿主机编号、最后检测时间。
+- **添加实例**：点击右上角“+ 添加监控实例”，输入从 AutoDL 控制台复制的实例 UUID 和自定义备注。
+- **独立开关**：随时点击滑动开关开启或暂停某台实例的监控（修改即时生效并同步保存至 `config.json`）。
+- **删除监控**：点击卡片底部的“删除监控”按钮即可移除。
 
 ---
 
 ## ⚙️ 配置文件说明 (`config.json`)
 
+配置文件自动与 WebUI 保持双向同步：
+
 ```json
 {
-  "authorization": "",
-  "gpu_model": "RTX 4090",
+  "authorization": "你的AutoDL Token",
+  "xizhi_url": "https://xizhi.qqoq.net/XZ92fff6ec8b293488bd67699b2d0a0faf.send",
   "check_interval_seconds": 30,
-  "xizhi_url": "https://xizhi.qqoq.net/XZ92fff6ec8b293488bd67699b2d0a0faf.send"
+  "web_port": 5178,
+  "instances": [
+    {
+      "uuid": "0a1b2c3d-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      "alias": "4090大模型微调",
+      "enabled": true
+    },
+    {
+      "uuid": "9f8e7d6c-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      "alias": "A100实验机",
+      "enabled": false
+    }
+  ]
 }
 ```
 
-- **authorization**: AutoDL 的授权令牌（可留空，程序首次运行会引导粘贴或登录，并自动写回）。
-- **gpu_model**: 需要监控的 GPU 型号，如 `"RTX 4090"`, `"RTX 5090"`, `"A100-SXM4-80GB"`, `"RTX 3090"` 等。
-- **check_interval_seconds**: 轮询检测间隔（秒），默认 30 秒。
-- **xizhi_url**: 息知消息推送接口。
-
 ---
 
-## 🚀 运行方法
+## 🚀 启动与后台常驻
 
-### 前台运行
-- **Linux**:
-  ```bash
-  ./autodl_monitor
-  ```
-- **Windows**:
-  ```cmd
-  autodl_monitor.exe
-  ```
+### 前台启动
+- **Linux**: `./autodl_monitor`
+- **Windows**: `autodl_monitor.exe`
 
-### Linux 后台静默运行（长期挂机监控）
+### Linux 服务器后台静默守护
 ```bash
 nohup ./autodl_monitor > monitor.log 2>&1 &
 
-# 查看实时日志
+# 查看日志
 tail -f monitor.log
 
-# 停止监控
+# 停止程序
 pkill autodl_monitor
 ```

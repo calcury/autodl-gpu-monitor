@@ -1,6 +1,13 @@
 {
   "authorization": "",
-  "gpu_model": "RTX 4090",
+  "xizhi_url": "https://xizhi.qqoq.net/XZ92fff6ec8b293488bd67699b2d0a0faf.send",
   "check_interval_seconds": 30,
-  "xizhi_url": "https://xizhi.qqoq.net/XZ92fff6ec8b293488bd67699b2d0a0faf.send"
+  "web_port": 5178,
+  "instances": [
+    {
+      "uuid": "0a1b2c3d-sample-xxxx-xxxx-xxxxxxxxxxxx",
+      "alias": "LoRA微调测试机",
+      "enabled": false
+    }
+  ]
 }

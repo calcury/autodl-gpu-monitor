@@ -5,8 +5,10 @@
 #include <map>
 #include <chrono>
 #include <thread>
+#include <mutex>
 #include <ctime>
 #include <iomanip>
+#include <algorithm>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -14,109 +16,98 @@
 
 #include "json.hpp"
 #include "http_client.hpp"
+#include "http_server.hpp"
+#include "webui_html.hpp"
 #include "sha1.hpp"
 
 using json = nlohmann::json;
 
-// 区域友好中文名称映射
-const std::map<std::string, std::string> REGION_NAMES = {
-    {"[\"nm-B1\",\"nm-B2\"]", "内蒙B区"},
-    {"[\"cq-A1\"]", "重庆A区"},
-    {"[\"west-B\",\"west-C\"]", "西北B区"},
-    {"[\"bj-B1\"]", "北京B区"},
-    {"[\"beijing-A\",\"beijing-B\",\"beijing-D\",\"beijing-E\"]", "北京A区"},
-    {"[\"foshan-A\"]", "佛山区"},
-    {"[\"neimeng-A\",\"neimeng-C\",\"neimeng-D\"]", "内蒙A区"},
-    {"[\"bj-C1\"]", "L20专区"},
-    {"[\"yz-A1\"]", "3090专区"},
-    {"[\"beijing-C\"]", "V100专区"},
-    {"[\"nm-A1\"]", "A800专区"},
-    {"[\"gd-A1\"]", "华为昇腾专区"}
+// 单台实例的监控数据模型
+struct MonitorInstance {
+    std::string uuid;
+    std::string alias;
+    bool enabled = true;
+
+    // 运行时监控状态
+    std::string machine_id = "";
+    std::string gpu_name = "";
+    int current_idle_num = 0;
+    int prev_idle_num = 0;
+    std::string last_check_time = "-";
+    std::string status_str = "未检测";
+    bool has_notified_in_this_cycle = false;
 };
 
-// GPU 型号与支持区域映射
-const std::map<std::string, std::vector<std::vector<std::string>>> GPU_TO_REGIONS = {
-    {"RTX 5090", {{"west-B", "west-C"}}},
-    {"RTX 4090", {{"nm-B1", "nm-B2"}, {"cq-A1"}, {"west-B", "west-C"}, {"bj-B1"}}},
-    {"RTX 4090D", {{"cq-A1"}, {"west-B", "west-C"}}},
-    {"RTX 3090", {{"nm-B1", "nm-B2"}, {"cq-A1"}, {"west-B", "west-C"}, {"beijing-A", "beijing-B", "beijing-D", "beijing-E"}, {"yz-A1"}}},
-    {"RTX 3080*2", {{"nm-B1", "nm-B2"}, {"west-B", "west-C"}}},
-    {"RTX 3080 Ti", {{"west-B", "west-C"}}},
-    {"RTX 3080", {{"beijing-A", "beijing-B", "beijing-D", "beijing-E"}}},
-    {"RTX 3060", {{"west-B", "west-C"}}},
-    {"RTX 2080 Ti *2", {{"nm-B1", "nm-B2"}, {"cq-A1"}}},
-    {"RTX 2080 Ti", {{"beijing-A", "beijing-B", "beijing-D", "beijing-E"}}},
-    {"GTX 1080 Ti", {{"west-B", "west-C"}}},
-    {"vGPU-32GB", {{"nm-B1", "nm-B2"}, {"west-B", "west-C"}}},
-    {"vGPU-48GB", {{"west-B", "west-C"}}},
-    {"V100-32GB", {{"foshan-A"}, {"beijing-C"}}},
-    {"V100-SXM2-32GB", {{"beijing-A", "beijing-B", "beijing-D", "beijing-E"}}},
-    {"A100-PCIE-40GB", {{"foshan-A"}}},
-    {"A100-SXM4-80GB", {{"neimeng-A", "neimeng-C", "neimeng-D"}}},
-    {"L20", {{"bj-C1"}}},
-    {"L40", {{"west-B", "west-C"}}},
-    {"A40", {{"neimeng-A", "neimeng-C", "neimeng-D"}}},
-    {"H800", {{"west-B", "west-C"}}},
-    {"A800-80GB", {{"nm-A1"}}},
-    {"H20-NVLink", {{"beijing-A", "beijing-B", "beijing-D", "beijing-E"}, {"bj-C1"}}},
-    {"TITAN Xp", {{"nm-B1", "nm-B2"}}},
-    {"Tesla T4", {{"foshan-A"}}},
-    {"RTX A4000", {{"west-B", "west-C"}}},
-    {"CPU", {{"cq-A1"}, {"west-B", "west-C"}}},
-    {"CPU-close-HT", {{"west-B", "west-C"}}},
-    {"910B2x鲲鹏920", {{"gd-A1"}}}
-};
-
-// 当前时间字符串 (兼容跨平台)
-std::string get_current_time_str() {
-    auto now = std::chrono::system_clock::now();
-    std::time_t t = std::chrono::system_clock::to_time_t(now);
-    std::tm tm_buf;
-#ifdef _WIN32
-    localtime_s(&tm_buf, &t);
-#else
-    localtime_r(&t, &tm_buf);
-#endif
-    char buf[64];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-    return std::string(buf);
-}
-
-// 配置结构体
-struct AppConfig {
+// 全局应用配置与状态管理
+class AppManager {
+public:
     std::string authorization;
-    std::string gpu_model = "RTX 4090";
-    int check_interval_seconds = 30;
     std::string xizhi_url = "https://xizhi.qqoq.net/XZ92fff6ec8b293488bd67699b2d0a0faf.send";
-    std::string config_file_path = "config.json";
-    json raw_json;
+    int check_interval_seconds = 30;
+    int web_port = 5178;
+    std::string config_path = "config.json";
 
-    bool load(const std::string& path = "config.json") {
-        config_file_path = path;
+    std::vector<MonitorInstance> instances;
+    std::mutex mtx;
+
+    static std::string get_current_time_str() {
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_buf;
+#ifdef _WIN32
+        localtime_s(&tm_buf, &t);
+#else
+        localtime_r(&t, &tm_buf);
+#endif
+        char buf[64];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+        return std::string(buf);
+    }
+
+    bool load_config(const std::string& path = "config.json") {
+        std::lock_guard<std::mutex> lock(mtx);
+        config_path = path;
         std::ifstream file(path);
-        if (!file.is_open()) {
-            return false;
-        }
+        if (!file.is_open()) return false;
+
         try {
-            file >> raw_json;
-            if (raw_json.contains("authorization") && raw_json["authorization"].is_string()) {
-                authorization = raw_json["authorization"].get<std::string>();
+            json j;
+            file >> j;
+
+            if (j.contains("authorization") && j["authorization"].is_string()) {
+                authorization = j["authorization"].get<std::string>();
             }
-            if (raw_json.contains("gpu_model") && raw_json["gpu_model"].is_string()) {
-                gpu_model = raw_json["gpu_model"].get<std::string>();
-            } else if (raw_json.contains("gpu") && raw_json["gpu"].contains("model") && raw_json["gpu"]["model"].is_string()) {
-                // 兼容旧版 config.json
-                gpu_model = raw_json["gpu"]["model"].get<std::string>();
+            if (j.contains("xizhi_url") && j["xizhi_url"].is_string()) {
+                xizhi_url = j["xizhi_url"].get<std::string>();
+            }
+            if (j.contains("check_interval_seconds") && j["check_interval_seconds"].is_number()) {
+                check_interval_seconds = j["check_interval_seconds"].get<int>();
+            }
+            if (j.contains("web_port") && j["web_port"].is_number()) {
+                web_port = j["web_port"].get<int>();
             }
 
-            if (raw_json.contains("check_interval_seconds") && raw_json["check_interval_seconds"].is_number()) {
-                check_interval_seconds = raw_json["check_interval_seconds"].get<int>();
-            }
-
-            if (raw_json.contains("xizhi_url") && raw_json["xizhi_url"].is_string()) {
-                xizhi_url = raw_json["xizhi_url"].get<std::string>();
-            } else {
-                raw_json["xizhi_url"] = xizhi_url;
+            instances.clear();
+            if (j.contains("instances") && j["instances"].is_array()) {
+                for (const auto& item : j["instances"]) {
+                    MonitorInstance inst;
+                    inst.uuid = item.value("uuid", "");
+                    inst.alias = item.value("alias", "");
+                    inst.enabled = item.value("enabled", true);
+                    if (!inst.uuid.empty()) {
+                        instances.push_back(inst);
+                    }
+                }
+            } else if (j.contains("instance_uuid") && j["instance_uuid"].is_string()) {
+                // 兼容旧版单实例配置
+                std::string single_uuid = j["instance_uuid"].get<std::string>();
+                if (!single_uuid.empty()) {
+                    MonitorInstance inst;
+                    inst.uuid = single_uuid;
+                    inst.alias = "默认实例";
+                    inst.enabled = true;
+                    instances.push_back(inst);
+                }
             }
             return true;
         } catch (...) {
@@ -124,78 +115,117 @@ struct AppConfig {
         }
     }
 
-    bool save() {
-        raw_json["authorization"] = authorization;
-        raw_json["gpu_model"] = gpu_model;
-        raw_json["check_interval_seconds"] = check_interval_seconds;
-        raw_json["xizhi_url"] = xizhi_url;
+    bool save_config() {
+        std::lock_guard<std::mutex> lock(mtx);
+        json j;
+        j["authorization"] = authorization;
+        j["xizhi_url"] = xizhi_url;
+        j["check_interval_seconds"] = check_interval_seconds;
+        j["web_port"] = web_port;
 
-        std::ofstream file(config_file_path);
+        json inst_arr = json::array();
+        for (const auto& inst : instances) {
+            json item;
+            item["uuid"] = inst.uuid;
+            item["alias"] = inst.alias;
+            item["enabled"] = inst.enabled;
+            inst_arr.push_back(item);
+        }
+        j["instances"] = inst_arr;
+
+        std::ofstream file(config_path);
         if (!file.is_open()) return false;
-        file << raw_json.dump(2);
+        file << j.dump(2);
         return true;
+    }
+
+    // Web API: 获取所有实例状态 (严格保密，不输出 Authorization)
+    json get_instances_json() {
+        std::lock_guard<std::mutex> lock(mtx);
+        json arr = json::array();
+        for (const auto& inst : instances) {
+            json item;
+            item["uuid"] = inst.uuid;
+            item["alias"] = inst.alias;
+            item["enabled"] = inst.enabled;
+            item["machine_id"] = inst.machine_id;
+            item["gpu_name"] = inst.gpu_name;
+            item["current_idle_num"] = inst.current_idle_num;
+            item["last_check_time"] = inst.last_check_time;
+            item["status_str"] = inst.status_str;
+            arr.push_back(item);
+        }
+        return arr;
+    }
+
+    // Web API: 添加新实例
+    bool add_instance(const std::string& uuid, const std::string& alias) {
+        if (uuid.empty()) return false;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            for (auto& inst : instances) {
+                if (inst.uuid == uuid) {
+                    inst.alias = alias;
+                    inst.enabled = true;
+                    return true;
+                }
+            }
+            MonitorInstance inst;
+            inst.uuid = uuid;
+            inst.alias = alias.empty() ? "未命名实例" : alias;
+            inst.enabled = true;
+            instances.push_back(inst);
+        }
+        save_config();
+        return true;
+    }
+
+    // Web API: 切换开启/关闭开关
+    bool toggle_instance(const std::string& uuid, bool enabled) {
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            for (auto& inst : instances) {
+                if (inst.uuid == uuid) {
+                    inst.enabled = enabled;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (found) save_config();
+        return found;
+    }
+
+    // Web API: 删除监控实例
+    bool delete_instance(const std::string& uuid) {
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            auto it = std::remove_if(instances.begin(), instances.end(),
+                                     [&uuid](const MonitorInstance& i) { return i.uuid == uuid; });
+            if (it != instances.end()) {
+                instances.erase(it, instances.end());
+                found = true;
+            }
+        }
+        if (found) save_config();
+        return found;
     }
 };
 
-// 手机号密码登录 AutoDL
-bool login_with_password(AppConfig& config, const std::string& phone, const std::string& password) {
-    std::cout << "[登录] 正在通过手机号密码登录 AutoDL..." << std::endl;
-    std::string pwd_hash = utils::sha1(password);
+AppManager g_app;
 
-    json login_req;
-    login_req["phone"] = phone;
-    login_req["password"] = pwd_hash;
-    login_req["phone_area"] = "+86";
-
-    auto resp = HttpClient::post_json("https://www.autodl.com/api/v1/new_login", login_req.dump());
-    if (!resp.success) {
-        std::cerr << "[错误] 登录请求失败: " << resp.error_message << " (状态码: " << resp.status_code << ")" << std::endl;
-        return false;
-    }
-
-    try {
-        auto j = json::parse(resp.body);
-        if (j.value("code", "") != "Success") {
-            std::cerr << "[错误] 登录失败: " << j.value("msg", "未知错误") << std::endl;
-            return false;
-        }
-        std::string ticket = j["data"]["ticket"].get<std::string>();
-
-        // 获取 token
-        json passport_req;
-        passport_req["ticket"] = ticket;
-        auto passport_resp = HttpClient::post_json("https://www.autodl.com/api/v1/passport", passport_req.dump());
-        if (!passport_resp.success) {
-            std::cerr << "[错误] 获取 Token 失败: " << passport_resp.error_message << std::endl;
-            return false;
-        }
-
-        auto pj = json::parse(passport_resp.body);
-        if (pj.value("code", "") != "Success") {
-            std::cerr << "[错误] 获取 Token 响应异常: " << pj.value("msg", "") << std::endl;
-            return false;
-        }
-
-        config.authorization = pj["data"]["token"].get<std::string>();
-        config.save();
-        std::cout << "[成功] 登录成功并已自动更新到 config.json！" << std::endl;
-        return true;
-    } catch (const std::exception& e) {
-        std::cerr << "[错误] 解析登录响应数据异常: " << e.what() << std::endl;
-        return false;
-    }
-}
-
-// 发送息知 (xizhi) 推送通知
-bool send_xizhi_notification(const std::string& xizhi_url, const std::string& title, const std::string& content) {
-    std::string full_url = xizhi_url;
+// 发送息知推送通知
+bool send_xizhi_notification(const std::string& title, const std::string& content) {
+    std::string full_url = g_app.xizhi_url;
     if (full_url.find('?') == std::string::npos) {
         full_url += "?title=" + HttpClient::url_encode(title) + "&content=" + HttpClient::url_encode(content);
     } else {
         full_url += "&title=" + HttpClient::url_encode(title) + "&content=" + HttpClient::url_encode(content);
     }
 
-    std::cout << "[推送] 正在发送通知至息知平台..." << std::endl;
+    std::cout << "[推送] 正在推送有卡通知至息知微信渠道..." << std::endl;
     auto resp = HttpClient::get(full_url);
     if (resp.success) {
         std::cout << "[推送] 息知响应: " << resp.body << std::endl;
@@ -206,192 +236,300 @@ bool send_xizhi_notification(const std::string& xizhi_url, const std::string& ti
     }
 }
 
-// 检查某个区域的 GPU 状态
-struct RegionGpuStatus {
-    std::string region_raw;
-    std::string region_name;
-    bool has_available = false;
-    int idle_num = 0;
-    json raw_data;
-};
-
-RegionGpuStatus check_region_gpu(const AppConfig& config, const std::vector<std::string>& region_sign_list) {
-    RegionGpuStatus status;
-    json reg_json = region_sign_list;
-    status.region_raw = reg_json.dump();
-
-    auto it = REGION_NAMES.find(status.region_raw);
-    if (it != REGION_NAMES.end()) {
-        status.region_name = it->second;
-    } else {
-        status.region_name = status.region_raw;
+// 检查所有已启用的实例
+void check_instances_task() {
+    std::string auth;
+    {
+        std::lock_guard<std::mutex> lock(g_app.mtx);
+        auth = g_app.authorization;
     }
 
-    json req_body;
-    req_body["region_sign_list"] = region_sign_list;
+    if (auth.empty()) return;
 
+    // 1. 请求 AutoDL 用户实例列表 API 获取实例信息与物理机状态
     std::map<std::string, std::string> headers = {
-        {"Authorization", config.authorization},
+        {"Authorization", auth},
         {"User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     };
 
-    auto resp = HttpClient::post_json("https://www.autodl.com/api/v1/machine/region/gpu_type",
+    json req_body;
+    req_body["page_index"] = 1;
+    req_body["page_size"] = 100;
+
+    auto resp = HttpClient::post_json("https://www.autodl.com/api/v1/user/instance/list",
                                       req_body.dump(), headers);
 
     if (!resp.success) {
-        return status;
+        std::cerr << "[API] 获取用户实例列表失败: " << resp.error_message << std::endl;
+        return;
     }
 
     try {
         auto res_json = json::parse(resp.body);
         if (res_json.value("code", "") == "AuthorizeFailed") {
-            std::cerr << "[警告] AutoDL Authorization 已失效或超时，请重新登录！" << std::endl;
-            return status;
+            std::cerr << "[警告] AutoDL Authorization 已失效或超时，请在 config.json 更新 Token！" << std::endl;
+            return;
         }
 
-        if (res_json.contains("data") && res_json["data"].is_array()) {
-            for (const auto& item : res_json["data"]) {
-                if (item.is_object() && item.contains(config.gpu_model)) {
-                    auto gpu_obj = item[config.gpu_model];
-                    status.raw_data = gpu_obj;
+        if (!res_json.contains("data") || !res_json["data"].contains("list")) return;
 
-                    // 判断是否有可用机器
-                    int idle = 0;
-                    if (gpu_obj.contains("idle_num") && gpu_obj["idle_num"].is_number()) {
-                        idle = gpu_obj["idle_num"].get<int>();
-                    } else if (gpu_obj.contains("gpu_idle_num") && gpu_obj["gpu_idle_num"].is_number()) {
-                        idle = gpu_obj["gpu_idle_num"].get<int>();
-                    }
-
-                    status.idle_num = idle;
-                    if (idle > 0) {
-                        status.has_available = true;
-                    }
-                    break;
-                }
+        // 构建远端实例映射表 (uuid -> info)
+        std::map<std::string, json> remote_instances;
+        for (const auto& item : res_json["data"]["list"]) {
+            std::string u = item.value("instance_uuid", "");
+            if (!u.empty()) {
+                remote_instances[u] = item;
             }
         }
-    } catch (...) {
-        // JSON 解析忽略
-    }
 
-    return status;
+        std::string now_str = AppManager::get_current_time_str();
+
+        std::lock_guard<std::mutex> lock(g_app.mtx);
+        for (auto& inst : g_app.instances) {
+            // 如果用户关闭了此实例的监控开关，则直接跳过不运行
+            if (!inst.enabled) {
+                inst.status_str = "监控已暂停";
+                continue;
+            }
+
+            auto it = remote_instances.find(inst.uuid);
+            if (it == remote_instances.end()) {
+                inst.last_check_time = now_str;
+                inst.status_str = "未在 AutoDL 账号中找到此实例";
+                continue;
+            }
+
+            const auto& info = it->second;
+            inst.machine_id = info.value("machine_id", "");
+            inst.gpu_name = info.value("gpu_name", "");
+            inst.status_str = info.value("status", "");
+            inst.last_check_time = now_str;
+
+            // 获取该物理宿主机的空闲卡数
+            int idle_count = 0;
+            if (info.contains("gpu_idle_num") && info["gpu_idle_num"].is_number()) {
+                idle_count = info["gpu_idle_num"].get<int>();
+            } else if (info.contains("machine_gpu_idle_num") && info["machine_gpu_idle_num"].is_number()) {
+                idle_count = info["machine_gpu_idle_num"].get<int>();
+            } else if (info.value("status", "") == "running") {
+                // 如果该实例当前本身就在运行中
+                idle_count = 1;
+            }
+
+            inst.current_idle_num = idle_count;
+
+            // ===================================================================
+            // 核心状态跳变提醒逻辑 (Edge Trigger):
+            // 仅在实例宿主机 GPU 从“0台”变为“>0台”时触发提醒！
+            // 例子: 0 -> 1 -> 0 -> 2 -> 4 -> 2 -> 0，只在 0->1 和 0->2 触发两次提醒！
+            // 绝不在有卡期间每 30 秒重复轰炸！
+            // ===================================================================
+            if (inst.current_idle_num > 0 && inst.prev_idle_num == 0 && !inst.has_notified_in_this_cycle) {
+                std::cout << "\n======================================================\n";
+                std::cout << " 🎉【检测到实例有空闲 GPU！】\n";
+                std::cout << " 实例备注: " << inst.alias << "\n";
+                std::cout << " 实例UUID: " << inst.uuid << "\n";
+                std::cout << " GPU 型号: " << inst.gpu_name << "\n";
+                std::cout << " 空闲卡数: " << inst.current_idle_num << " 台\n";
+                std::cout << " 宿主机ID: " << inst.machine_id << "\n";
+                std::cout << "======================================================\n";
+
+                std::string title = "【AutoDL开机提醒】" + inst.alias + " 有空闲GPU";
+                std::string content = "时间: " + now_str + "\n"
+                                    + "实例备注: " + inst.alias + "\n"
+                                    + "实例UUID: " + inst.uuid + "\n"
+                                    + "GPU 型号: " + inst.gpu_name + "\n"
+                                    + "当前空闲卡数: " + std::to_string(inst.current_idle_num) + " 台\n"
+                                    + "物理宿主机: " + inst.machine_id + "\n\n"
+                                    + "检测到宿主机已释放可用显卡，请立即前往控制台开机！";
+
+                send_xizhi_notification(title, content);
+                inst.has_notified_in_this_cycle = true;
+            } else if (inst.current_idle_num == 0) {
+                // 当卡被全部占用变为 0 时，重置周期通知标记，等待下一次释放！
+                inst.has_notified_in_this_cycle = false;
+            }
+
+            // 更新上一次的历史状态
+            inst.prev_idle_num = inst.current_idle_num;
+        }
+
+    } catch (const std::exception& e) {
+        std::cerr << "[错误] 解析实例列表响应异常: " << e.what() << std::endl;
+    }
+}
+
+// 启动 WebUI 路由服务 (端口 5178)
+void setup_web_server(SimpleHttpServer& server) {
+    server.set_handler([](const std::string& method,
+                          const std::string& path,
+                          const std::string& body,
+                          std::string& resp_content_type,
+                          std::string& resp_body,
+                          int& resp_status) {
+        // 1. 首页: 返回内嵌的 WebUI 前端页面
+        if (path == "/" || path == "/index.html") {
+            resp_content_type = "text/html; charset=utf-8";
+            resp_body = WEBUI_HTML;
+            resp_status = 200;
+            return;
+        }
+
+        // 2. API: 获取监控实例列表 (严格保密，前端绝对不可见 authorization)
+        if (method == "GET" && path == "/api/instances") {
+            resp_content_type = "application/json; charset=utf-8";
+            resp_body = g_app.get_instances_json().dump();
+            resp_status = 200;
+            return;
+        }
+
+        // 3. API: 添加监控实例 (传入 uuid 和 alias)
+        if (method == "POST" && path == "/api/instances") {
+            try {
+                auto req_j = json::parse(body);
+                std::string uuid = req_j.value("uuid", "");
+                std::string alias = req_j.value("alias", "");
+                if (g_app.add_instance(uuid, alias)) {
+                    resp_content_type = "application/json; charset=utf-8";
+                    resp_body = "{\"success\": true}";
+                    resp_status = 200;
+                } else {
+                    resp_status = 400;
+                    resp_body = "{\"error\": \"uuid 不能为空\"}";
+                }
+            } catch (...) {
+                resp_status = 400;
+                resp_body = "{\"error\": \"无效的 JSON\"}";
+            }
+            return;
+        }
+
+        // 4. API: 开启/关闭某个实例的监控开关
+        if (method == "POST" && path == "/api/instances/toggle") {
+            try {
+                auto req_j = json::parse(body);
+                std::string uuid = req_j.value("uuid", "");
+                bool enabled = req_j.value("enabled", true);
+                if (g_app.toggle_instance(uuid, enabled)) {
+                    resp_content_type = "application/json; charset=utf-8";
+                    resp_body = "{\"success\": true}";
+                    resp_status = 200;
+                } else {
+                    resp_status = 404;
+                    resp_body = "{\"error\": \"未找到对应实例\"}";
+                }
+            } catch (...) {
+                resp_status = 400;
+                resp_body = "{\"error\": \"无效的 JSON\"}";
+            }
+            return;
+        }
+
+        // 5. API: 删除实例
+        if (method == "POST" && path == "/api/instances/delete") {
+            try {
+                auto req_j = json::parse(body);
+                std::string uuid = req_j.value("uuid", "");
+                if (g_app.delete_instance(uuid)) {
+                    resp_content_type = "application/json; charset=utf-8";
+                    resp_body = "{\"success\": true}";
+                    resp_status = 200;
+                } else {
+                    resp_status = 404;
+                    resp_body = "{\"error\": \"未找到对应实例\"}";
+                }
+            } catch (...) {
+                resp_status = 400;
+                resp_body = "{\"error\": \"无效的 JSON\"}";
+            }
+            return;
+        }
+
+        // 默认 404
+        resp_status = 404;
+        resp_body = "Not Found";
+    });
 }
 
 int main() {
 #ifdef _WIN32
-    // 设置 Windows 控制台为 UTF-8 编码
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 #endif
 
-    std::cout << "====================================================\n";
-    std::cout << "        AutoDL GPU 资源监控系统 (C++ 原生版)        \n";
-    std::cout << "====================================================\n\n";
+    std::cout << "======================================================\n";
+    std::cout << "     AutoDL 实例 GPU 资源监控系统 (WebUI + C++ 原生版)   \n";
+    std::cout << "======================================================\n\n";
 
-    AppConfig config;
-    if (!config.load()) {
-        std::cout << "[提示] 未检测到 config.json 或解析失败，正在初始化默认配置...\n";
-        config.save();
+    if (!g_app.load_config()) {
+        std::cout << "[提示] 未检测到 config.json，正在初始化基础配置...\n";
+        g_app.save_config();
     }
 
-    // 检查并引导 authorization 凭证
-    if (config.authorization.empty()) {
+    // 检查并引导 authorization 凭证 (后端保密管理)
+    if (g_app.authorization.empty()) {
         std::cout << "[提示] 当前未配置 AutoDL Authorization。\n";
         std::cout << "请选择授权方式:\n";
-        std::cout << "  1. 直接粘贴 Web 控制台的 Authorization Token (推荐)\n";
-        std::cout << "  2. 输入 AutoDL 手机号和密码登录\n";
+        std::cout << "  1. 粘贴 Web 控制台的 Authorization Token (推荐)\n";
+        std::cout << "  2. 退出并稍后手动填入 config.json\n";
         std::cout << "请输入选项 (1 或 2): ";
         int choice = 1;
         std::cin >> choice;
         std::cin.ignore();
 
-        if (choice == 2) {
-            std::string phone, pwd;
-            std::cout << "请输入手机号: ";
-            std::cin >> phone;
-            std::cout << "请输入密码: ";
-            std::cin >> pwd;
-            std::cin.ignore();
-            if (!login_with_password(config, phone, pwd)) {
-                std::cerr << "[退出] 登录未成功，程序退出。\n";
-                return 1;
-            }
-        } else {
+        if (choice == 1) {
             std::cout << "请粘贴您的 Authorization Token: ";
-            std::getline(std::cin, config.authorization);
-            if (config.authorization.empty()) {
-                std::cerr << "[错误] Authorization 不能为空！\n";
-                return 1;
+            std::getline(std::cin, g_app.authorization);
+            if (!g_app.authorization.empty()) {
+                g_app.save_config();
+                std::cout << "[成功] Token 已保存至 config.json！\n";
             }
-            config.save();
-            std::cout << "[成功] Token 已保存至 config.json！\n";
         }
     }
 
-    // 检查所选的 GPU 型号
-    auto it_regions = GPU_TO_REGIONS.find(config.gpu_model);
-    if (it_regions == GPU_TO_REGIONS.end()) {
-        std::cerr << "[警告] GPU 型号 '" << config.gpu_model << "' 未在内置预设区域列表中。\n";
-        std::cerr << "默认将监控所有常用区域...\n";
+    // 启动内嵌 WebUI 服务 (默认端口 5178)
+    SimpleHttpServer web_server(g_app.web_port);
+    setup_web_server(web_server);
+    if (!web_server.start()) {
+        std::cerr << "[WebUI] 无法开放在端口 " << g_app.web_port << "，请检查端口是否被占用。\n";
     }
 
-    std::cout << "\n----------------------------------------------------\n";
-    std::cout << "监控目标 GPU : " << config.gpu_model << "\n";
-    std::cout << "检测间隔     : " << config.check_interval_seconds << " 秒\n";
-    std::cout << "息知推送接口 : " << config.xizhi_url << "\n";
-    std::cout << "----------------------------------------------------\n";
-    std::cout << "[状态] 开始持续监控，按 Ctrl+C 可停止运行...\n\n";
+    std::cout << "\n------------------------------------------------------\n";
+    std::cout << "WebUI 控制台   : http://localhost:" << g_app.web_port << "\n";
+    std::cout << "轮询检测间隔   : " << g_app.check_interval_seconds << " 秒\n";
+    std::cout << "息知推送接口   : " << g_app.xizhi_url << "\n";
+    std::cout << "监控状态规则   : 仅在 0->有空闲 跳变时发送一次提醒，不重复轰炸\n";
+    std::cout << "------------------------------------------------------\n";
+    std::cout << "[状态] 后台监控已开始运行，按 Ctrl+C 可停止程序...\n\n";
 
     int round = 0;
     while (true) {
         round++;
-        std::string current_time = get_current_time_str();
-        std::cout << "[" << current_time << "] 第 " << round << " 次检测中..." << std::endl;
+        std::string current_time = AppManager::get_current_time_str();
 
-        std::vector<RegionGpuStatus> available_list;
-
-        const auto& regions = (it_regions != GPU_TO_REGIONS.end()) 
-                              ? it_regions->second 
-                              : std::vector<std::vector<std::string>>{
-                                  {"nm-B1", "nm-B2"}, {"cq-A1"}, {"west-B", "west-C"},
-                                  {"bj-B1"}, {"beijing-A", "beijing-B", "beijing-D", "beijing-E"}
-                              };
-
-        for (const auto& reg_list : regions) {
-            RegionGpuStatus st = check_region_gpu(config, reg_list);
-            if (st.has_available) {
-                available_list.push_back(st);
+        int enabled_count = 0;
+        int total_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_app.mtx);
+            total_count = static_cast<int>(g_app.instances.size());
+            for (const auto& i : g_app.instances) {
+                if (i.enabled) enabled_count++;
             }
         }
 
-        if (!available_list.empty()) {
-            std::cout << "\n====================================================" << std::endl;
-            std::cout << "  🎉【发现可用 GPU 资源！】 型号: " << config.gpu_model << std::endl;
-            std::cout << "====================================================" << std::endl;
+        std::cout << "[" << current_time << "] 第 " << round << " 次检测中 (总实例: "
+                  << total_count << ", 已启用: " << enabled_count << ")..." << std::endl;
 
-            std::string content = "时间: " + current_time + "\n";
-            content += "目标型号: " + config.gpu_model + "\n可用区域详情:\n";
-
-            for (const auto& st : available_list) {
-                std::string line = "  - " + st.region_name + " (空闲数量: " + std::to_string(st.idle_num) + " 台)";
-                std::cout << line << std::endl;
-                content += line + "\n";
-            }
-            content += "\n请尽快前往 AutoDL 控制台创建实例！";
-
-            std::string title = "【AutoDL有卡提醒】" + config.gpu_model + " 发现可用机器";
-            send_xizhi_notification(config.xizhi_url, title, content);
-
-            std::cout << "\n[完成] 通知已推送，监控任务完成。" << std::endl;
-            break;
+        if (enabled_count > 0) {
+            check_instances_task();
         } else {
-            std::cout << " -> 暂无可用空闲机器，" << config.check_interval_seconds << " 秒后进行下一次检测..." << std::endl;
+            std::cout << " -> 暂无启用的监控实例，可通过浏览器访问 http://localhost:"
+                      << g_app.web_port << " 添加实例。" << std::endl;
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(config.check_interval_seconds));
+        std::this_thread::sleep_for(std::chrono::seconds(g_app.check_interval_seconds));
     }
 
-    std::cout << "\n程序已退出，感谢使用。" << std::endl;
+    web_server.stop();
     return 0;
 }
