@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 struct HttpResponse
@@ -271,8 +272,9 @@ public:
             std::remove(tmp_file.c_str());
         }
 
-        // 如果命令未找到 (例如系统没有 curl)
-        if (raw_output.find("not found") != std::string::npos || raw_output.find("command not found") != std::string::npos)
+        // 只有 shell 以 127 退出（命令未找到）时才认定 curl 缺失。
+        // 不能用 body 里是否含 "not found" 来判断，因为 2>&1 把响应体也合并进来了。
+        if (WIFEXITED(exit_code) && WEXITSTATUS(exit_code) == 127)
         {
             response.error_message = "系统未安装 curl 命令行，请执行 sudo apt-get install -y curl";
             response.status_code = 0;
