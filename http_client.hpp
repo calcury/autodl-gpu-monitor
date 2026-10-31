@@ -167,7 +167,7 @@ public:
 
 #else
     // ==========================================
-    // Linux / POSIX 实现 (基于安全文件重定向，彻底杜绝换行转义及空输入问题)
+    // Linux / POSIX 实现 (基于安全文件重定向与精确生命周期管理)
     // ==========================================
 private:
     static std::string escape_shell_arg(const std::string& arg) {
@@ -187,7 +187,7 @@ public:
                                 const std::map<std::string, std::string>& headers = {}) {
         HttpResponse response;
 
-        // 构造高精度纳秒级唯一临时文件名
+        // 构造安全纯字母数字的无空格临时路径
         auto now_ns = std::chrono::high_resolution_clock::now().time_since_epoch().count();
         std::string req_file = "/tmp/autodl_req_" + std::to_string(now_ns) + ".json";
         std::string resp_file = "/tmp/autodl_resp_" + std::to_string(now_ns) + ".json";
@@ -197,28 +197,26 @@ public:
             std::ofstream ofs(req_file, std::ios::binary);
             if (ofs.is_open()) {
                 ofs.write(body.data(), body.size());
+                ofs.flush();
                 ofs.close();
             }
         }
 
-        // 关键设计: 使用 -o 将完整响应体写入文件，使用 -w %{http_code} 只把纯状态码输出到 stdout
+        // 注意: curl 的 @file 和 -o file 路径本身无特殊字符，直接传递绝对路径，不可加单引号包裹
         std::ostringstream cmd;
-        cmd << "curl -s -S -k --noproxy '*' -o " << escape_shell_arg(resp_file)
+        cmd << "curl -s -S -k --noproxy '*' -o " << resp_file
             << " -w '%{http_code}' --connect-timeout 10 -m 30 -X " << method;
         for (const auto& [k, v] : headers) {
             cmd << " -H " << escape_shell_arg(k + ": " + v);
         }
         if (has_body) {
-            cmd << " --data-binary @" << escape_shell_arg(req_file);
+            cmd << " --data-binary @" << req_file;
         }
         cmd << " " << escape_shell_arg(full_url) << " 2>&1";
 
         FILE* pipe = popen(cmd.str().c_str(), "r");
-        if (has_body) {
-            std::remove(req_file.c_str());
-        }
-
         if (!pipe) {
+            if (has_body) std::remove(req_file.c_str());
             response.error_message = "无法启动 curl 进程进行请求";
             return response;
         }
@@ -230,7 +228,12 @@ public:
         }
         int exit_code = pclose(pipe);
 
-        // 从独立响应文件中读取完整响应体
+        // 关键: 必须在 pclose 等待子进程执行完毕后，才能清理请求临时文件！
+        if (has_body) {
+            std::remove(req_file.c_str());
+        }
+
+        // 读取响应体文件
         std::ifstream ifs(resp_file, std::ios::binary);
         if (ifs.is_open()) {
             std::ostringstream ss;
@@ -240,7 +243,7 @@ public:
             std::remove(resp_file.c_str());
         }
 
-        // 解析状态码 (提取最后出现的 3 位连续数字)
+        // 解析状态码
         try {
             std::string code_digits;
             for (int i = static_cast<int>(stdout_str.length()) - 1; i >= 0; --i) {
