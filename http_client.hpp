@@ -6,13 +6,18 @@
 #include <sstream>
 #include <iomanip>
 #include <cctype>
+#include <chrono>
+#include <fstream>
+#include <iostream>
 
 #ifdef _WIN32
 #include <windows.h>
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
 #else
-#include <curl/curl.h>
+#include <cstdio>
+#include <cstdlib>
+#include <unistd.h>
 #endif
 
 struct HttpResponse {
@@ -41,7 +46,8 @@ public:
 
 #ifdef _WIN32
     // ==========================================
-    // Windows 实现 (基于系统原生 WinHTTP，零外部依赖)
+    // Windows 实现 (基于 Windows 系统内置 WinHTTP，免装任何三方库)
+    // 编译命令: g++ -std=c++17 -O2 main.cpp -o autodl_monitor.exe -lwinhttp
     // ==========================================
 private:
     static std::wstring to_wide(const std::string& str) {
@@ -161,73 +167,82 @@ public:
 
 #else
     // ==========================================
-    // Linux / POSIX 实现 (基于标准 libcurl，编译只需 -lcurl)
+    // Linux / POSIX 实现 (零外部库依赖，无需安装 libcurl 开发包，无需 <curl/curl.h>)
+    // 编译命令仅需: g++ -std=c++17 -O2 main.cpp -o autodl_monitor
     // ==========================================
-private:
-    static size_t curl_write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
-        size_t total_size = size * nmemb;
-        std::string* s = static_cast<std::string*>(userp);
-        s->append(static_cast<char*>(contents), total_size);
-        return total_size;
-    }
-
 public:
     static HttpResponse request(const std::string& full_url,
                                 const std::string& method = "GET",
                                 const std::string& body = "",
                                 const std::map<std::string, std::string>& headers = {}) {
         HttpResponse response;
-        CURL* curl = curl_easy_init();
-        if (!curl) {
-            response.error_message = "初始化 CURL 失败";
+
+        // 构造临时文件用于安全传输 body (规避命令行特殊字符转义问题)
+        std::string tmp_file = "/tmp/autodl_req_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".json";
+        bool has_body = !body.empty() && (method == "POST" || method == "PUT");
+        if (has_body) {
+            std::ofstream ofs(tmp_file, std::ios::binary);
+            if (ofs.is_open()) {
+                ofs.write(body.data(), body.size());
+                ofs.close();
+            }
+        }
+
+        std::ostringstream cmd;
+        cmd << "curl -s -S -w \"\\n%{http_code}\" --connect-timeout 10 -m 30 -X " << method;
+        for (const auto& [k, v] : headers) {
+            cmd << " -H " << std::quoted(k + ": " + v);
+        }
+        if (has_body) {
+            cmd << " --data-binary @" << tmp_file;
+        }
+        cmd << " " << std::quoted(full_url) << " 2>/dev/null";
+
+        FILE* pipe = popen(cmd.str().c_str(), "r");
+        if (has_body) {
+            std::remove(tmp_file.c_str());
+        }
+
+        if (!pipe) {
+            response.error_message = "无法启动 curl 进程进行请求";
             return response;
         }
 
-        curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        std::string raw_output;
+        char buffer[4096];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            raw_output += buffer;
+        }
+        int exit_code = pclose(pipe);
 
-        // 设置请求方法与 Body
-        if (method == "POST") {
-            curl_easy_setopt(curl, CURLOPT_POST, 1L);
-            if (!body.empty()) {
-                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.length());
-            }
-        } else if (method != "GET") {
-            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
-            if (!body.empty()) {
-                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.length());
-            }
+        // 解析输出结果：最后一行是 HTTP 状态码
+        size_t last_newline = raw_output.find_last_of("\r\n");
+        while (last_newline != std::string::npos && (raw_output[last_newline] == '\r' || raw_output[last_newline] == '\n')) {
+            raw_output.erase(last_newline);
+            last_newline = raw_output.find_last_of("\r\n");
         }
 
-        // 设置 Headers
-        struct curl_slist* chunk = NULL;
-        for (const auto& [k, v] : headers) {
-            std::string header_line = k + ": " + v;
-            chunk = curl_slist_append(chunk, header_line.c_str());
-        }
-        if (chunk) {
-            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, chunk);
-        }
-
-        CURLcode res = curl_easy_perform(curl);
-        if (res == CURLE_OK) {
-            long http_code = 0;
-            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-            response.status_code = static_cast<int>(http_code);
-            response.success = (response.status_code >= 200 && response.status_code < 400);
+        last_newline = raw_output.find_last_of("\r\n");
+        std::string status_str;
+        if (last_newline == std::string::npos) {
+            status_str = raw_output;
+            response.body = "";
         } else {
-            response.error_message = curl_easy_strerror(res);
+            status_str = raw_output.substr(last_newline + 1);
+            response.body = raw_output.substr(0, last_newline);
         }
 
-        if (chunk) {
-            curl_slist_free_all(chunk);
+        try {
+            response.status_code = std::stoi(status_str);
+        } catch (...) {
+            response.status_code = (exit_code == 0) ? 200 : 0;
         }
-        curl_easy_cleanup(curl);
+
+        response.success = (response.status_code >= 200 && response.status_code < 400);
+        if (!response.success && response.error_message.empty()) {
+            response.error_message = "HTTP 请求失败 (状态码: " + std::to_string(response.status_code) + ")";
+        }
+
         return response;
     }
 #endif
