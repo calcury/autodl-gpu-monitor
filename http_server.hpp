@@ -26,7 +26,7 @@ typedef int socklen_t;
 #define closesocket close
 #endif
 
-// 极轻量级跨平台自包含 HTTP Server (单头文件实现，开放在 5178 端口)
+// 极轻量级跨平台自包含 HTTP Server (单头文件实现，监听 0.0.0.0:5178)
 class SimpleHttpServer {
 public:
     using Handler = std::function<void(const std::string& method,
@@ -37,6 +37,7 @@ public:
                                       int& resp_status)>;
 
 private:
+    std::string host_ = "0.0.0.0";
     int port_ = 5178;
     SOCKET server_socket_ = INVALID_SOCKET;
     std::atomic<bool> running_{false};
@@ -64,7 +65,6 @@ private:
             buffer[bytes_read] = '\0';
             raw_request.append(buffer, bytes_read);
             if (raw_request.find("\r\n\r\n") != std::string::npos) {
-                // 已读取完头部，检查 Content-Length
                 size_t cl_pos = raw_request.find("Content-Length:");
                 if (cl_pos == std::string::npos) cl_pos = raw_request.find("content-length:");
                 if (cl_pos != std::string::npos) {
@@ -86,7 +86,6 @@ private:
             return;
         }
 
-        // 解析请求行
         std::istringstream req_stream(raw_request);
         std::string method, path, http_ver;
         req_stream >> method >> path >> http_ver;
@@ -97,7 +96,6 @@ private:
             body = raw_request.substr(header_end + 4);
         }
 
-        // 调用业务路由处理
         std::string content_type = "text/html; charset=utf-8";
         std::string resp_body = "Not Found";
         int resp_status = 404;
@@ -123,7 +121,8 @@ private:
     }
 
 public:
-    SimpleHttpServer(int port = 5178) : port_(port) {
+    SimpleHttpServer(const std::string& host = "0.0.0.0", int port = 5178) 
+        : host_(host), port_(port) {
         init_network();
     }
 
@@ -148,11 +147,17 @@ public:
         sockaddr_in server_addr;
         memset(&server_addr, 0, sizeof(server_addr));
         server_addr.sin_family = AF_INET;
-        server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+        if (host_ == "0.0.0.0" || host_.empty()) {
+            server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        } else {
+            inet_pton(AF_INET, host_.c_str(), &server_addr.sin_addr);
+        }
+
         server_addr.sin_port = htons(static_cast<uint16_t>(port_));
 
         if (bind(server_socket_, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-            std::cerr << "[WebUI] 绑定端口 " << port_ << " 失败 (端口可能已被占用)" << std::endl;
+            std::cerr << "[WebUI] 绑定 " << host_ << ":" << port_ << " 失败 (端口可能已被占用)" << std::endl;
             closesocket(server_socket_);
             server_socket_ = INVALID_SOCKET;
             return false;
@@ -179,7 +184,8 @@ public:
             }
         });
 
-        std::cout << "[WebUI] 已成功启动！浏览器访问地址: http://localhost:" << port_ << std::endl;
+        std::cout << "[WebUI] 已成功启动！监听地址: http://" << host_ << ":" << port_ 
+                  << " (支持本机、局域网及公网 IP 访问)" << std::endl;
         return true;
     }
 

@@ -43,6 +43,7 @@ class AppManager {
 public:
     std::string authorization;
     std::string xizhi_url = "https://xizhi.qqoq.net/XZ92fff6ec8b293488bd67699b2d0a0faf.send";
+    std::string web_host = "0.0.0.0";
     int check_interval_seconds = 30;
     int web_port = 5178;
     std::string config_path = "config.json";
@@ -79,6 +80,9 @@ public:
             }
             if (j.contains("xizhi_url") && j["xizhi_url"].is_string()) {
                 xizhi_url = j["xizhi_url"].get<std::string>();
+            }
+            if (j.contains("web_host") && j["web_host"].is_string()) {
+                web_host = j["web_host"].get<std::string>();
             }
             if (j.contains("check_interval_seconds") && j["check_interval_seconds"].is_number()) {
                 check_interval_seconds = j["check_interval_seconds"].get<int>();
@@ -120,6 +124,7 @@ public:
         json j;
         j["authorization"] = authorization;
         j["xizhi_url"] = xizhi_url;
+        j["web_host"] = web_host;
         j["check_interval_seconds"] = check_interval_seconds;
         j["web_port"] = web_port;
 
@@ -487,15 +492,15 @@ int main() {
         }
     }
 
-    // 启动内嵌 WebUI 服务 (默认端口 5178)
-    SimpleHttpServer web_server(g_app.web_port);
+    // 启动内嵌 WebUI 服务 (默认监听 0.0.0.0:5178)
+    SimpleHttpServer web_server(g_app.web_host, g_app.web_port);
     setup_web_server(web_server);
     if (!web_server.start()) {
-        std::cerr << "[WebUI] 无法开放在端口 " << g_app.web_port << "，请检查端口是否被占用。\n";
+        std::cerr << "[WebUI] 无法开放在 " << g_app.web_host << ":" << g_app.web_port << "，请检查端口是否被占用。\n";
     }
 
     std::cout << "\n------------------------------------------------------\n";
-    std::cout << "WebUI 控制台   : http://localhost:" << g_app.web_port << "\n";
+    std::cout << "WebUI 控制台   : http://" << g_app.web_host << ":" << g_app.web_port << "\n";
     std::cout << "轮询检测间隔   : " << g_app.check_interval_seconds << " 秒\n";
     std::cout << "息知推送接口   : " << g_app.xizhi_url << "\n";
     std::cout << "监控状态规则   : 仅在 0->有空闲 跳变时发送一次提醒，不重复轰炸\n";
